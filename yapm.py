@@ -693,6 +693,51 @@ def uninstall_yapm():
     shutil.rmtree("/var/lib/yapm", ignore_errors=True)
     print("Successfully uninstalled yapm.")
 
+YAPM_SOURCE_URL = "https://raw.githubusercontent.com/galaxyg144/yapm/main/yapm.py"
+
+def self_upgrade_yapm(force: bool = False):
+    import re
+    print(f"Fetching latest yapm from {YAPM_SOURCE_URL} ...")
+    data = download(YAPM_SOURCE_URL, desc="Downloading yapm")
+    if not data:
+        print("Error: failed to download the latest yapm.")
+        sys.exit(1)
+
+    new_src = data.decode("utf-8", errors="replace")
+
+    # Parse APP_VERSION from the downloaded script
+    m = re.search(r'^APP_VERSION\s*=\s*["\'](.+?)["\']', new_src, re.MULTILINE)
+    if not m:
+        print("Error: could not determine version of the downloaded script.")
+        sys.exit(1)
+    new_ver = m.group(1)
+
+    print(f"  Installed : {APP_VERSION}")
+    print(f"  Available : {new_ver}")
+
+    if not force and new_ver == APP_VERSION:
+        print("yapm is already up to date.")
+        return
+
+    if not force and new_ver < APP_VERSION:
+        print("Downloaded version is older than installed. Use --force to override.")
+        return
+
+    # Atomic replace: write to a temp file beside the target, then rename
+    target = Path("/usr/local/bin/yapm")
+    tmp = target.with_suffix(".tmp")
+    try:
+        tmp.write_bytes(data)
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, target)   # atomic on Linux
+    except Exception as e:
+        print(f"Error writing new yapm: {e}")
+        tmp.unlink(missing_ok=True)
+        sys.exit(1)
+
+    print(f"yapm upgraded: {APP_VERSION} -> {new_ver}")
+    print("Restart yapm to use the new version.")
+
 def info_package(pkg: str):
     idx = load_index()
     db = load_db()
@@ -878,6 +923,21 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
+    # self-upgrade
+    p_selfupgrade = sub.add_parser(
+        "self-upgrade",
+        help="Upgrade yapm itself to the latest version from GitHub",
+        description="Download the latest yapm.py from the official GitHub repository\n"
+                    "and replace the installed binary at /usr/local/bin/yapm.\n\n"
+                    "The replacement is atomic (write-then-rename) so a failed\n"
+                    "download never corrupts the installed binary.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_selfupgrade.add_argument(
+        "--force", action="store_true",
+        help="Replace the binary even if the downloaded version is the same or older",
+    )
+
     # build
     p_build = sub.add_parser(
         "build",
@@ -966,6 +1026,8 @@ def main():
         print(f"config version {ver}")
     elif args.command == "uninstall":
         uninstall_yapm()
+    elif args.command == "self-upgrade":
+        self_upgrade_yapm(force=args.force)
     elif args.command == "mirror":
         if args.mirror_cmd == "add":
             mirror_add(args.url, args.priority)
