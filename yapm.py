@@ -391,23 +391,34 @@ def load_index() -> Dict:
 def fetch_package(pkg: str) -> Optional[bytes]:
     idx = load_index()
     pkg_info = idx.get("packages", {}).get(pkg)
-    
+
+    def _try_yapm_urls(mirror_url: str, version: str = "") -> Optional[bytes]:
+        """Try bare name then versioned name for YAPM packages."""
+        candidates = [f"{pkg}.yapm"]
+        if version and version != "0.0.0":
+            candidates.append(f"{pkg}-{version}.yapm")
+        for candidate in candidates:
+            url = normalize(mirror_url) + candidate
+            data = download(url, desc=f"Downloading {pkg}")
+            if data:
+                return data
+        return None
+
     if pkg_info and "mirror" in pkg_info:
         if pkg_info.get("format") in ["deb", "arch"]:
             download_path = pkg_info.get("download_path", "")
             if download_path:
                 url = normalize(pkg_info["mirror"]) + download_path
-            else:
-                return None
+                data = download(url, desc=f"Downloading {pkg}")
+                if data: return data
+            return None
         else:
-            url = normalize(pkg_info["mirror"]) + f"{pkg}.yapm"
-            
-        data = download(url, desc=f"Downloading {pkg}")
-        if data: return data
-        
+            version = pkg_info.get("version", "")
+            data = _try_yapm_urls(pkg_info["mirror"], version)
+            if data: return data
+
     for mirror in sorted_mirrors():
-        url = normalize(mirror["url"]) + f"{pkg}.yapm"
-        data = download(url, desc=f"Downloading {pkg}")
+        data = _try_yapm_urls(mirror["url"])
         if data:
             return data
     return None
@@ -546,7 +557,7 @@ def install_package(pkg: str, fmt: str):
     pkg_name = pkg
     
     pkg_path = Path(pkg)
-    if pkg_path.exists():
+    if pkg_path.is_file():
         # Auto-detect format from extension if installing from a local file
         if pkg_path.suffix == ".deb": fmt = "deb"
         elif pkg_path.name.endswith(".pkg.tar.zst"): fmt = "arch"
