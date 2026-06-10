@@ -43,7 +43,7 @@ DEFAULT_CONFIG = {
         {"url": "https://deb.debian.org/debian/", "priority": 20},
         {"url": "https://mirror.rackspace.com/archlinux/", "priority": 30},
         {"url": "https://mirrors.fedoraproject.org/", "priority": 40},
-        {"url": "https://mirror.yapm.dev/packages/", "priority": 50}
+        {"url": "https://yapm.pages.dev/", "priority": 50}
     ]
 }
 
