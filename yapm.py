@@ -16,25 +16,23 @@ from pathlib import Path
 from typing import List, Dict, Optional
 
 # ============================================================
-# CONFIGURATION PATHS (Defaults)
+# CONFIGURATION PATHS
 # ============================================================
 
 APP_VERSION = "0.2-alpha"
 CURRENT_VERSION = 1  # Config version
 
-HOME = Path.home()
-
-# These will be dynamically set in configure_paths()
-CONFIG_DIR = HOME / ".config" / "yapm"
+# yapm always runs as root — all paths are system-wide
+CONFIG_DIR  = Path("/etc/yapm")
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
-DATA_DIR = HOME / ".local" / "share" / "yapm"
+DATA_DIR    = Path("/var/lib/yapm")
 INSTALL_DIR = DATA_DIR / "packages"
-DB_FILE = DATA_DIR / "installed.json"
+DB_FILE     = DATA_DIR / "installed.json"
 
-CACHE_DIR = DATA_DIR / "cache"
-INDEX_FILE = CACHE_DIR / "index.json"
-BIN_DIR = HOME / ".local" / "bin"
+CACHE_DIR   = DATA_DIR / "cache"
+INDEX_FILE  = CACHE_DIR / "index.json"
+BIN_DIR     = Path("/usr/local/bin")
 
 DEFAULT_CONFIG = {
     "version": CURRENT_VERSION,
@@ -47,26 +45,12 @@ DEFAULT_CONFIG = {
     ]
 }
 
-def configure_paths(is_system: bool):
-    global CONFIG_DIR, CONFIG_FILE, DATA_DIR, INSTALL_DIR, DB_FILE, CACHE_DIR, INDEX_FILE, BIN_DIR
-    if is_system:
-        if os.getuid() != 0:
-            print("Error: System-wide operations (-S) require sudo privileges.")
-            sys.exit(1)
-        CONFIG_DIR = Path("/etc/yapm")
-        DATA_DIR = Path("/var/lib/yapm")
-        BIN_DIR = Path("/usr/local/bin")
-    else:
-        HOME = Path.home()
-        CONFIG_DIR = HOME / ".config" / "yapm"
-        DATA_DIR = HOME / ".local" / "share" / "yapm"
-        BIN_DIR = HOME / ".local" / "bin"
-
-    CONFIG_FILE = CONFIG_DIR / "config.json"
-    INSTALL_DIR = DATA_DIR / "packages"
-    DB_FILE = DATA_DIR / "installed.json"
-    CACHE_DIR = DATA_DIR / "cache"
-    INDEX_FILE = CACHE_DIR / "index.json"
+def require_root():
+    """Abort immediately if not running as root."""
+    if os.getuid() != 0:
+        print("Error: yapm must be run with sudo.")
+        print("  Try: sudo yapm <command>")
+        sys.exit(1)
 
 # ============================================================
 # INITIALIZATION
@@ -670,18 +654,7 @@ def list_installed():
         print(f"{pkg} (v{ver}) [{fmt.upper()}]")
 
 def uninstall_yapm():
-    if os.getuid() != 0:
-        print("Error: uninstalling system YAPM requires sudo.")
-        # Try to uninstall user version if running without sudo
-        std_bin = Path.home() / ".local" / "bin" / "yapm"
-        if std_bin.exists():
-            os.unlink(std_bin)
-            shutil.rmtree(HOME / ".config" / "yapm", ignore_errors=True)
-            shutil.rmtree(HOME / ".local" / "share" / "yapm", ignore_errors=True)
-            print("Successfully uninstalled user-level yapm.")
-            return
-        sys.exit(1)
-
+    # require_root() has already run before this point
     print("Uninstalling system-wide yapm...")
     script_path = Path(__file__).resolve()
     if "bin/yapm" in str(script_path):
@@ -768,52 +741,176 @@ def build_package(directory: str):
 # ============================================================
 
 def main():
-    parser = argparse.ArgumentParser(prog="yapm", description="Yet Another Package Manager (Universal)")
-    parser.add_argument("-f", "--format", choices=["yapm", "deb", "arch"], default="yapm", help="Specify the package format")
-    parser.add_argument("-S", "--system", action="store_true", help="Perform system-wide operation (requires sudo)")
+    parser = argparse.ArgumentParser(
+        prog="yapm",
+        description="yapm — Yet Another Package Manager\n"
+                    "Supports native .yapm packages as well as .deb (Debian/Ubuntu) and\n"
+                    "Arch Linux packages (.pkg.tar.zst) via upstream mirrors.\n\n"
+                    "Run 'yapm update' first to build the local package index.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "-f", "--format",
+        choices=["yapm", "deb", "arch"],
+        default="yapm",
+        metavar="FORMAT",
+        help="Override the package format for local installs (yapm | deb | arch). "
+             "Auto-detected from file extension when installing a local file.",
+    )
 
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command", required=True, metavar="<command>")
 
-    p_install = sub.add_parser("install", help="Install a package")
-    p_install.add_argument("package")
+    # install
+    p_install = sub.add_parser(
+        "install",
+        help="Install a package from a mirror or a local file",
+        description="Download and install a package by name from the configured mirrors, "
+                    "or install directly from a local .yapm / .deb / .pkg.tar.zst file.\n\n"
+                    "Dependencies listed in yapm.data are resolved and installed first.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_install.add_argument("package", metavar="PACKAGE",
+                           help="Package name (looked up in index) or path to a local package file")
 
-    p_remove = sub.add_parser("remove", help="Remove a package")
-    p_remove.add_argument("package")
+    # remove
+    p_remove = sub.add_parser(
+        "remove",
+        help="Remove an installed package",
+        description="Uninstall a package, removing its files and any bin symlinks. "
+                    "Does NOT automatically remove dependencies.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_remove.add_argument("package", metavar="PACKAGE",
+                          help="Name of the installed package to remove")
 
-    sub.add_parser("list", help="List installed packages")
+    # list
+    sub.add_parser(
+        "list",
+        help="List all installed packages",
+        description="Print every installed package along with its version and format.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
 
-    p_info = sub.add_parser("info", help="Get info about a package")
-    p_info.add_argument("package")
+    # info
+    p_info = sub.add_parser(
+        "info",
+        help="Show details about a package",
+        description="Display local install status and remote index information for a package, "
+                    "including version, description, and dependencies.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_info.add_argument("package", metavar="PACKAGE",
+                        help="Package name to inspect")
 
-    p_search = sub.add_parser("search", help="Search for packages in the index")
-    p_search.add_argument("term")
+    # search
+    p_search = sub.add_parser(
+        "search",
+        help="Search the local package index",
+        description="Search package names and descriptions in the cached index.\n"
+                    "Run 'yapm update' first to ensure the index is up to date.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_search.add_argument("term", metavar="TERM",
+                          help="Search term (matched against name and description)")
 
-    sub.add_parser("update", help="Update the local package index from mirrors")
-    sub.add_parser("upgrade", help="Upgrade all installed packages to their latest versions")
-    sub.add_parser("version", help="Show version info")
-    sub.add_parser("uninstall", help="Uninstall YAPM itself")
+    # update
+    sub.add_parser(
+        "update",
+        help="Refresh the package index from all mirrors",
+        description="Fetch and merge package lists from all configured mirrors into a local\n"
+                    "index cache. Supports Debian/Ubuntu (Packages.gz), Arch (core.db),\n"
+                    "and native YAPM (index.json) mirror formats.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
 
-    p_build = sub.add_parser("build", help="Build a .yapm package from a directory containing yapm.data")
-    p_build.add_argument("directory", help="The directory containing the package files and yapm.data")
+    # upgrade
+    sub.add_parser(
+        "upgrade",
+        help="Upgrade all installed packages to their latest versions",
+        description="Compare installed package versions against the cached index and\n"
+                    "re-download any packages where a newer version is available.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
 
-    p_mirror = sub.add_parser("mirror", help="Manage mirrors")
-    mirror_sub = p_mirror.add_subparsers(dest="mirror_cmd", required=True)
-    
-    m_add = mirror_sub.add_parser("add", help="Add a new mirror")
-    m_add.add_argument("url", help="URL of the mirror")
-    m_add.add_argument("-p", "--priority", type=int, default=10, help="Priority (lower is better, default: 10)")
-    
-    mirror_sub.add_parser("list", help="List all mirrors")
-    
-    m_remove = mirror_sub.add_parser("remove", help="Remove a mirror")
-    m_remove.add_argument("url", help="URL of the mirror to remove")
-    
-    mirror_sub.add_parser("sync", help="Check/refresh mirror status")
+    # version
+    sub.add_parser(
+        "version",
+        help="Print yapm version information",
+        description="Print the yapm application version and the config schema version.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    # uninstall
+    sub.add_parser(
+        "uninstall",
+        help="Uninstall yapm itself from the system",
+        description="Remove the yapm binary and all of its data directories\n"
+                    "(/etc/yapm and /var/lib/yapm). This does NOT remove packages\n"
+                    "that were installed by yapm.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    # build
+    p_build = sub.add_parser(
+        "build",
+        help="Build a .yapm package from a source directory",
+        description="Package a directory into a distributable .yapm file (ZIP format).\n"
+                    "The directory must contain a yapm.data manifest with at least:\n"
+                    "  [METADATA]  name = \"pkg\"  version = \"1.0.0\"\n"
+                    "The output file is written to the current working directory.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_build.add_argument("directory", metavar="DIR",
+                         help="Path to the directory containing package files and yapm.data")
+
+    # mirror
+    p_mirror = sub.add_parser(
+        "mirror",
+        help="Manage package mirrors",
+        description="Add, remove, list, or validate the package mirrors that yapm uses\n"
+                    "when running 'yapm update' and 'yapm install'.\n\n"
+                    "Mirrors are sorted by priority; lower numbers are tried first.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    mirror_sub = p_mirror.add_subparsers(dest="mirror_cmd", required=True, metavar="<subcommand>")
+
+    m_add = mirror_sub.add_parser(
+        "add",
+        help="Add a new mirror",
+        description="Register a new mirror URL. Use -p to set its priority "
+                    "(lower = higher precedence).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    m_add.add_argument("url", metavar="URL", help="Full URL of the mirror (e.g. https://example.com/yapm/)")
+    m_add.add_argument("-p", "--priority", type=int, default=10, metavar="N",
+                       help="Mirror priority — lower numbers are tried first (default: 10)")
+
+    mirror_sub.add_parser(
+        "list",
+        help="List all configured mirrors",
+        description="Print all registered mirrors in priority order.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    m_remove = mirror_sub.add_parser(
+        "remove",
+        help="Remove a mirror by URL",
+        description="Unregister a mirror. Use 'yapm mirror list' to find the exact URL.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    m_remove.add_argument("url", metavar="URL", help="URL of the mirror to remove")
+
+    mirror_sub.add_parser(
+        "sync",
+        help="Test all mirrors and remove unreachable ones",
+        description="Send a HEAD request to each mirror and remove any that fail to respond. "
+                    "Useful after adding new mirrors or if 'yapm update' is slow.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
 
     args = parser.parse_args()
 
-    # Apply configuration based on system flag
-    configure_paths(args.system)
+    require_root()
     ensure_dirs()
 
     if args.command == "install":
