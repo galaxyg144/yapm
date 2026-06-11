@@ -99,6 +99,17 @@ def save_db(db: Dict):
 def normalize(url: str) -> str:
     return url if url.endswith("/") else url + "/"
 
+def pkg_basename(key: str) -> str:
+    """Strip author prefix from a key for filename guessing (author/name -> name)."""
+    return key.split("/", 1)[-1]
+
+def format_key(key: str) -> str:
+    """Convert internal key to display form (author/name -> author@name)."""
+    if "/" in key:
+        a, n = key.split("/", 1)
+        return f"{a}@{n}"
+    return key
+
 def sorted_mirrors() -> List[Dict]:
     config = load_config()
     return sorted(config["mirrors"], key=lambda x: x["priority"])
@@ -337,6 +348,57 @@ def parse_arch_index(mirror_url: str, merged_index: dict):
     except Exception as e:
         print(f"Error parsing Arch index: {e}")
 
+def get_pkg_info(idx: dict, pkg: str, version: Optional[str] = None) -> Optional[dict]:
+    """Look up a specific version of a package, handling both old and new index formats.
+    Supports author@name syntax and unqualified name disambiguation."""
+    packages = idx.get("packages", {})
+    entry = None
+    key = pkg
+
+    if "@" in pkg:
+        author, name = pkg.split("@", 1)
+        key = f"{author}/{name}"
+        entry = packages.get(key)
+        if not entry:
+            return None
+    else:
+        entry = packages.get(key)
+        if not entry:
+            matches = [k for k in packages if k.endswith(f"/{pkg}")]
+            if len(matches) == 0:
+                return None
+            elif len(matches) > 1:
+                print(f"Multiple packages named '{pkg}'. Which author?")
+                for i, m in enumerate(matches, 1):
+                    print(f"  [{i}] {format_key(m)}")
+                try:
+                    choice = int(input("> ").strip())
+                    if choice < 1 or choice > len(matches):
+                        print("Invalid choice.")
+                        sys.exit(1)
+                    key = matches[choice - 1]
+                except (ValueError, EOFError):
+                    print("Invalid input.")
+                    sys.exit(1)
+                entry = packages[key]
+            else:
+                key = matches[0]
+                entry = packages[key]
+
+    if "versions" in entry:
+        ver = version or entry.get("latest", "0.0.0")
+        ver_info = entry["versions"].get(ver)
+        if not ver_info:
+            return None
+        result = dict(ver_info)
+        result["version"] = ver
+        result["mirror"] = entry.get("mirror", "")
+        result["format"] = entry.get("format", "yapm")
+        result["latest"] = entry.get("latest", ver)
+        result["_key"] = key
+        return result
+    return dict(entry)
+
 def update_index():
     print("Updating package index...")
     merged_index = {"packages": {}}
@@ -356,15 +418,24 @@ def update_index():
                     if isinstance(pkgs, list):
                         new_pkgs = {p: {"version": "0.0.0", "dependencies": []} for p in pkgs}
                         pkgs = new_pkgs
-                        
+
                     for pkg_name, pkg_info in pkgs.items():
-                        if pkg_name not in merged_index["packages"]:
+                        if pkg_name in merged_index["packages"]:
+                            continue
+                        if "versions" in pkg_info:
+                            merged_index["packages"][pkg_name] = {
+                                "latest": pkg_info.get("latest", ""),
+                                "mirror": url,
+                                "format": "yapm",
+                                "versions": pkg_info.get("versions", {})
+                            }
+                        else:
                             pkg_info["mirror"] = url
                             pkg_info["format"] = "yapm"
                             merged_index["packages"][pkg_name] = pkg_info
                 except Exception as e:
                     print(f"Error parsing index from {url}: {e}")
-                
+
     with open(INDEX_FILE, "w") as f:
         json.dump(merged_index, f, indent=4)
     print("Index updated.")
@@ -376,68 +447,62 @@ def load_index() -> Dict:
     with open(INDEX_FILE) as f:
         return json.load(f)
 
-def fetch_package(pkg: str, mirror_url: Optional[str] = None) -> Optional[bytes]:
+def fetch_package(pkg: str, mirror_url: Optional[str] = None, version: Optional[str] = None) -> Optional[bytes]:
     idx = load_index()
-    pkg_info = idx.get("packages", {}).get(pkg)
+    pkg_info = get_pkg_info(idx, pkg, version)
+    fmt = (pkg_info or {}).get("format", "yapm")
+    base = pkg_basename(pkg)
 
-    def _try_yapm_urls(m_url: str, version: str = "") -> Optional[bytes]:
-        """Try bare name then versioned name for YAPM packages."""
-        candidates = [f"{pkg}.yapm"]
-        if version and version != "0.0.0":
-            candidates.append(f"{pkg}-{version}.yapm")
-        for candidate in candidates:
-            url = normalize(m_url) + candidate
+    def _try_at(m_url: str) -> Optional[bytes]:
+        if fmt in ("deb", "arch"):
+            download_path = (pkg_info or {}).get("download_path", "")
+            if download_path:
+                return download(normalize(m_url) + download_path, desc=f"Downloading {pkg}")
+            return None
+        candidates = []
+        if pkg_info and pkg_info.get("filename"):
+            candidates.append(pkg_info["filename"])
+        else:
+            candidates.append(f"{base}.yapm")
+            v = version or (pkg_info.get("version") if pkg_info else "")
+            if v and v != "0.0.0":
+                candidates.append(f"{base}-{v}.yapm")
+        for cand in candidates:
+            url = normalize(m_url) + cand
             data = download(url, desc=f"Downloading {pkg}")
             if data and is_valid_zip(data):
                 return data
         return None
 
-    # If a specific mirror was requested, only try that one
     if mirror_url:
-        version = pkg_info.get("version", "") if pkg_info else ""
-        fmt = pkg_info.get("format", "yapm") if pkg_info else "yapm"
-        if fmt in ["deb", "arch"]:
-            download_path = pkg_info.get("download_path", "") if pkg_info else ""
-            if download_path:
-                url = normalize(mirror_url) + download_path
-                return download(url, desc=f"Downloading {pkg}")
-            return None
-        return _try_yapm_urls(mirror_url, version)
+        return _try_at(mirror_url)
 
-    if pkg_info and "mirror" in pkg_info:
-        if pkg_info.get("format") in ["deb", "arch"]:
-            download_path = pkg_info.get("download_path", "")
-            if download_path:
-                url = normalize(pkg_info["mirror"]) + download_path
-                data = download(url, desc=f"Downloading {pkg}")
-                if data: return data
-            return None
-        else:
-            version = pkg_info.get("version", "")
-            data = _try_yapm_urls(pkg_info["mirror"], version)
-            if data: return data
+    if pkg_info and pkg_info.get("mirror"):
+        data = _try_at(pkg_info["mirror"])
+        if data:
+            return data
 
     for mirror in sorted_mirrors():
-        data = _try_yapm_urls(mirror["url"])
+        data = _try_at(mirror["url"])
         if data:
             return data
     return None
 
-def resolve_dependencies(pkg: str, idx: Dict, db: Dict, to_install: List[str], path: set):
+def resolve_dependencies(pkg: str, idx: Dict, db: Dict, to_install: List[str], path: set, version: Optional[str] = None):
     if pkg in to_install or pkg in db:
         return
     if pkg in path:
         print(f"Error: Circular dependency detected: {' -> '.join(path)} -> {pkg}")
         sys.exit(1)
-        
+
     path.add(pkg)
-    pkg_info = idx.get("packages", {}).get(pkg)
+    pkg_info = get_pkg_info(idx, pkg, version)
     if pkg_info:
         for dep in pkg_info.get("dependencies", []):
             resolve_dependencies(dep, idx, db, to_install, path)
     else:
         print(f"Warning: Package '{pkg}' not found in index. Cannot resolve its dependencies.")
-            
+
     to_install.append(pkg)
     path.remove(pkg)
 
@@ -554,7 +619,20 @@ def _install_single(pkg_name: str, db: Dict, data: bytes, fmt: str):
 def install_package(pkg: str, fmt: str, mirror_index: Optional[int] = None):
     db = load_db()
     idx = load_index()
-    pkg_name = pkg
+
+    # Parse author@name=version
+    pkg_spec = pkg
+    pkg_version = None
+    if "=" in pkg_spec:
+        pkg_spec, pkg_version = pkg_spec.split("=", 1)
+
+    pkg_author = None
+    if "@" in pkg_spec:
+        pkg_author, pkg_name = pkg_spec.split("@", 1)
+    else:
+        pkg_name = pkg_spec
+
+    pkg_key = f"{pkg_author}/{pkg_name}" if pkg_author else pkg_name
 
     # Resolve pinned mirror URL if -m was given
     pinned_mirror: Optional[str] = None
@@ -568,14 +646,14 @@ def install_package(pkg: str, fmt: str, mirror_index: Optional[int] = None):
             sys.exit(1)
         pinned_mirror = mirrors[mirror_index - 1]["url"]
         print(f"Pinned to mirror [{mirror_index}]: {pinned_mirror}")
-    
+
     pkg_path = Path(pkg)
     if pkg_path.is_file():
         # Auto-detect format from extension if installing from a local file
         if pkg_path.suffix == ".deb": fmt = "deb"
         elif pkg_path.name.endswith(".pkg.tar.zst"): fmt = "arch"
         elif pkg_path.suffix == ".yapm": fmt = "yapm"
-        
+
         # Determine package name from file name
         if pkg_path.name.endswith(".pkg.tar.zst"):
             pkg_name = pkg_path.name[:-12]
@@ -589,40 +667,51 @@ def install_package(pkg: str, fmt: str, mirror_index: Optional[int] = None):
         print(f"Installed {pkg_name} successfully.")
         return
 
-    # Remote installations currently default to YAPM format unless we add format hints to index
-    if pkg_name in db:
-        print(f"{pkg_name} is already installed.")
+    # Remote installations
+    if pkg_key in db:
+        ver_text = f" ({pkg_version})" if pkg_version else ""
+        display = format_key(pkg_key)
+        print(f"{display} is already installed.{ver_text}")
         return
 
     to_install = []
-    resolve_dependencies(pkg_name, idx, db, to_install, set())
-    
+    resolve_dependencies(pkg_key, idx, db, to_install, set(), version=pkg_version)
+
     if not to_install:
         print("Nothing to install.")
         return
-        
-    print(f"The following packages will be installed: {', '.join(to_install)}")
-    
+
+    ver_text = f" (pinning v{pkg_version})" if pkg_version else ""
+    display = format_key(pkg_key)
+    print(f"The following packages will be installed:{ver_text}")
     for p in to_install:
-        print(f"Installing {p}...")
-        data = fetch_package(p, mirror_url=pinned_mirror)
+        p_ver = pkg_version if p == pkg_key else None
+        display_p = format_key(p) if "/" in p else p
+        print(f"Installing {display_p}...")
+        data = fetch_package(p, mirror_url=pinned_mirror, version=p_ver)
         if not data:
-            print(f"Failed to fetch {p}. Aborting.")
+            print(f"Failed to fetch {display_p}. Aborting.")
             sys.exit(1)
-        
-        # Determine format from index
-        pkg_info = idx.get("packages", {}).get(p, {})
-        fetched_fmt = pkg_info.get("format", "yapm")
+
+        pkg_info = get_pkg_info(idx, p, p_ver)
+        fetched_fmt = (pkg_info or {}).get("format", "yapm")
         _install_single(p, db, data, fetched_fmt)
-        print(f"Installed {p}.")
+        print(f"Installed {display_p}.")
 
 def remove_package(pkg: str):
     db = load_db()
-    if pkg not in db:
-        print(f"Package '{pkg}' not installed.")
+
+    # Parse author@name
+    pkg_key = pkg
+    if "@" in pkg:
+        author, name = pkg.split("@", 1)
+        pkg_key = f"{author}/{name}"
+
+    if pkg_key not in db:
+        print(f"Package '{format_key(pkg_key)}' not installed.")
         return
 
-    target = Path(db[pkg]["path"])
+    target = Path(db[pkg_key]["path"])
     bin_source_dirs = [target / "src", target / "usr" / "bin", target / "bin"]
     
     for src_dir in bin_source_dirs:
@@ -633,35 +722,39 @@ def remove_package(pkg: str):
                     os.unlink(dest)
                     print(f"Removed link {dest}")
 
-    shutil.rmtree(db[pkg]["path"], ignore_errors=True)
-    del db[pkg]
+    shutil.rmtree(db[pkg_key]["path"], ignore_errors=True)
+    del db[pkg_key]
     save_db(db)
-    print(f"Removed {pkg}.")
+    print(f"Removed {format_key(pkg_key)}.")
 
 def upgrade_packages():
     db = load_db()
     idx = load_index()
-    
+
     to_upgrade = []
     for pkg, info in db.items():
         local_ver = info.get("version", "0.0.0")
         remote_info = idx.get("packages", {}).get(pkg)
-        if remote_info:
+        if not remote_info:
+            continue
+        if "versions" in remote_info:
+            remote_ver = remote_info.get("latest", "0.0.0")
+        else:
             remote_ver = remote_info.get("version", "0.0.0")
-            if remote_ver > local_ver:
-                to_upgrade.append((pkg, remote_ver))
-                
+        if remote_ver > local_ver:
+            to_upgrade.append((pkg, remote_ver))
+
     if not to_upgrade:
         print("Everything is up to date.")
         return
-        
+
     print("The following packages will be upgraded:")
     for pkg, ver in to_upgrade:
         print(f"  {pkg} ({db[pkg].get('version', '0.0.0')} -> {ver})")
-        
+
     for pkg, ver in to_upgrade:
         print(f"Upgrading {pkg}...")
-        data = fetch_package(pkg)
+        data = fetch_package(pkg, version=ver)
         if not data:
             print(f"Failed to fetch {pkg}. Skipping.")
             continue
@@ -741,24 +834,42 @@ def update_yapm(force: bool = False):
 def info_package(pkg: str):
     idx = load_index()
     db = load_db()
-    
-    print(f"Package: {pkg}")
-    
-    if pkg in db:
-        print(f"Status: Installed (v{db[pkg].get('version', '0.0.0')}) [Format: {db[pkg].get('format', 'yapm').upper()}]")
-        meta = db[pkg].get("metadata", {})
+
+    # Parse author@name to find the key
+    pkg_key = pkg
+    if "@" in pkg:
+        author, name = pkg.split("@", 1)
+        pkg_key = f"{author}/{name}"
+    else:
+        matches = [k for k in idx.get("packages", {}) if k.endswith(f"/{pkg}")] or [k for k in db if k.endswith(f"/{pkg}")]
+        if len(matches) == 1:
+            pkg_key = matches[0]
+
+    display = format_key(pkg_key) if "/" in pkg_key else pkg_key
+    print(f"Package: {display}")
+
+    if pkg_key in db:
+        print(f"Status: Installed (v{db[pkg_key].get('version', '0.0.0')}) [Format: {db[pkg_key].get('format', 'yapm').upper()}]")
+        meta = db[pkg_key].get("metadata", {})
         if "description" in meta:
             print(f"Description: {meta['description']}")
         if "dependencies" in meta and meta["dependencies"]:
             print(f"Dependencies: {', '.join(meta['dependencies'])}")
     else:
         print("Status: Not installed")
-        
-    if pkg in idx.get("packages", {}):
-        remote = idx["packages"][pkg]
-        print(f"Remote Version: {remote.get('version', '0.0.0')}")
-        if "dependencies" in remote and remote["dependencies"]:
-            print(f"Remote Dependencies: {', '.join(remote['dependencies'])}")
+
+    if pkg_key in idx.get("packages", {}):
+        entry = idx["packages"][pkg_key]
+        if "versions" in entry:
+            print(f"Available versions: {', '.join(sorted(entry['versions'].keys()))}")
+            print(f"Latest: {entry.get('latest', 'unknown')}")
+            ver_info = entry["versions"].get(entry.get("latest", ""), {})
+            if "dependencies" in ver_info and ver_info["dependencies"]:
+                print(f"Dependencies: {', '.join(ver_info['dependencies'])}")
+        else:
+            print(f"Remote Version: {entry.get('version', '0.0.0')}")
+            if "dependencies" in entry and entry["dependencies"]:
+                print(f"Remote Dependencies: {', '.join(entry['dependencies'])}")
     else:
         print("Not found in remote index.")
 
@@ -766,14 +877,24 @@ def search_package(term: str):
     idx = load_index()
     found = False
     term_lower = term.lower()
-    
-    for pkg_name, pkg_info in idx.get("packages", {}).items():
-        desc = pkg_info.get("description", "").lower()
-        if term_lower in pkg_name.lower() or term_lower in desc:
-            ver = pkg_info.get("version", "0.0.0")
-            print(f"{pkg_name} (v{ver}) - {pkg_info.get('description', 'No description')}")
+
+    for pkg_key, pkg_info in idx.get("packages", {}).items():
+        display = format_key(pkg_key)
+        display_lower = display.lower()
+
+        if "versions" in pkg_info:
+            latest_ver = pkg_info.get("latest", "")
+            ver_info = pkg_info["versions"].get(latest_ver, {})
+            desc = ver_info.get("description", "").lower()
+        else:
+            latest_ver = pkg_info.get("version", "0.0.0")
+            desc = pkg_info.get("description", "").lower()
+            ver_info = pkg_info
+
+        if term_lower in display_lower or term_lower in desc:
+            print(f"{display} (v{latest_ver}) - {ver_info.get('description', 'No description')}")
             found = True
-            
+
     if not found:
         print("No matches found in local index. Try 'yapm update' first.")
 
