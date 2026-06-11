@@ -906,7 +906,7 @@ def main():
     # fetch
     sub.add_parser(
         "fetch",
-        help="update yapm itself.",
+        help="Update yapm itself.",
         description="Download and install the latest version of yapm from the github repo.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -928,21 +928,6 @@ def main():
                     "(/etc/yapm and /var/lib/yapm). This does NOT remove packages\n"
                     "that were installed by yapm.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-
-    # self-upgrade
-    p_selfupgrade = sub.add_parser(
-        "self-upgrade",
-        help="Upgrade yapm itself to the latest version from GitHub",
-        description="Download the latest yapm.py from the official GitHub repository\n"
-                    "and replace the installed binary at /usr/local/bin/yapm.\n\n"
-                    "The replacement is atomic (write-then-rename) so a failed\n"
-                    "download never corrupts the installed binary.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    p_selfupgrade.add_argument(
-        "--force", action="store_true",
-        help="Replace the binary even if the downloaded version is the same or older",
     )
 
     # build
