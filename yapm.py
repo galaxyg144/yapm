@@ -1025,11 +1025,15 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     # fetch
-    sub.add_parser(
+    p_fetch = sub.add_parser(
         "fetch",
         help="Update yapm itself.",
         description="Download and install the latest version of yapm from the github repo.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_fetch.add_argument(
+        "--force", action="store_true",
+        help="Replace the binary even if the downloaded version is the same or older",
     )
         
 
