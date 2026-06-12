@@ -1044,7 +1044,15 @@ def build_package(directory: str):
                     tar.add(file_path, arcname=arcname)
                     
         subprocess.run(["zstd", "-f", "-19", tmp.name, "-o", out_file], check=True, stdout=subprocess.DEVNULL)
-                
+
+    sudo_uid = os.environ.get('SUDO_UID')
+    sudo_gid = os.environ.get('SUDO_GID')
+    if sudo_uid and sudo_gid:
+        try:
+            os.chown(out_file, int(sudo_uid), int(sudo_gid))
+        except Exception:
+            pass
+            
     print(f"Success! Package built: {out_file}")
 
 # ============================================================
