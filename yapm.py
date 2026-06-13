@@ -403,17 +403,28 @@ def parse_arch_index(mirror_url: str, merged_index: dict):
                     if f:
                         content = f.read().decode('utf-8', errors='ignore')
                         lines = content.splitlines()
-                        name, version = "", ""
+                        name, version, arch = "", "", "x86_64"
+                        dependencies = []
                         for i, line in enumerate(lines):
                             if line == "%NAME%": name = lines[i+1]
                             elif line == "%VERSION%": version = lines[i+1]
+                            elif line == "%ARCH%": arch = lines[i+1]
+                            elif line == "%DEPENDS%":
+                                j = i + 1
+                                while j < len(lines) and lines[j] and not lines[j].startswith("%"):
+                                    dep = lines[j]
+                                    for char in ('<', '>', '='):
+                                        dep = dep.split(char)[0]
+                                    dependencies.append(dep)
+                                    j += 1
                         
                         if name and name not in merged_index["packages"]:
                             merged_index["packages"][name] = {
                                 "version": version,
                                 "mirror": mirror_url,
                                 "format": "arch",
-                                "download_path": f"core/os/x86_64/{name}-{version}-x86_64.pkg.tar.zst"
+                                "dependencies": dependencies,
+                                "download_path": f"core/os/x86_64/{name}-{version}-{arch}.pkg.tar.zst"
                             }
     except Exception as e:
         print(f"Error parsing Arch index: {e}")
